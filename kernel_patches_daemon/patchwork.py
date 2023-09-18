@@ -455,6 +455,9 @@ class Series:
         ]
         await asyncio.gather(*tasks)
 
+    async def set_check_id(self, patch_id, **kwargs) -> None:
+        await self.pw_client.post_check_for_patch_id(patch_id, check_data=kwargs)
+
     def to_json(self) -> str:
         json_keys = {
             "id",
@@ -629,7 +632,7 @@ class Patchwork:
             **check_data,
             "state": new_state,
         }
-        logger.debug(
+        logger.info(
             f"Trying to update check for {patch_id} with a new content: {json_pprint(updated_check_data)}"
         )
         try:

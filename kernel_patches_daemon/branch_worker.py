@@ -12,6 +12,8 @@ import os
 import shutil
 import tempfile
 import time
+import re
+import requests
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
@@ -315,6 +317,26 @@ def _is_outdated_pr(pr: PullRequest) -> bool:
     age = datetime.now(timezone.utc) - last_modified
     logger.info(f"Pull request {pr} has age {age}")
     return age > PULL_REQUEST_TTL
+
+
+def scrape_workflow_run_results(logs: List[str]) -> Dict:
+    reg = ".*##.*](OK|FAIL).*Patch (\d?\d?\d+)/.*Test (\d?\d?\d+)/\d?\d?\d+: (.*)"
+    p = re.compile(reg)
+    res = {}
+    for i in logs:
+        m = p.match(i)
+        if m:
+            status = m.group(1)
+            patchnum = int(m.group(2))
+            testnum = int(m.group(3))
+            test = m.group(4)
+            if patchnum not in res:
+                res[patchnum] = {}
+            if testnum not in res[patchnum]:
+                res[patchnum][testnum] = {}
+                res[patchnum][testnum]["status"] = status
+                res[patchnum][testnum]["test"] = test
+    return res
 
 
 class BranchWorker(GithubConnector):
@@ -924,6 +946,87 @@ class BranchWorker(GithubConnector):
         await asyncio.gather(*tasks)
 
         await self.evaluate_ci_result(series, pr, vmtests)
+
+    def sync_checks_pr_per_patch_workflow_run_results(self, pr: PullRequest) -> (str, Dict):
+        workflow_run = None
+        for i in self.repo.get_workflow_runs(head_sha=pr.head.sha):
+            if i.name == "linux-riscv-ci-patches":
+                workflow_run = i
+                break
+        if not workflow_run:
+            return "", {}
+        job = None
+        for i in workflow_run.jobs():
+            if i.name == "build-patches":
+                job = i
+                break
+        if not job:
+            return "", {}
+
+        logs_url = job.logs_url()
+        logs = requests.get(logs_url, allow_redirects=True)
+        logs = logs.content.decode('utf-8')
+        strs = logs.splitlines()
+        return job.html_url, scrape_workflow_run_results(strs)
+
+    async def sync_checks_rv(self, pr: PullRequest, series: Series) -> None:
+        # if it's merge conflict - report failure
+        ctx = f"{CI_DESCRIPTION}-{self.repo_branch}"
+        if _is_pr_flagged(pr):
+            await series.set_check(
+                state="failure",
+                target_url=pr.html_url,
+                context=f"{ctx}-PR",
+                description=MERGE_CONFLICT_LABEL,
+            )
+            return
+
+        logger.info(f"Fetching check suites for {pr.number}: {pr.head.ref}")
+        # we use github actions, need to use check suite apis instead of combined status
+        # https://docs.github.com/en/rest/reference/checks#check-suites
+        cmt = self.repo.get_commit(pr.head.sha)
+        conclusion = None
+
+        # There is only 1 github-action check suite
+        for suite in cmt.get_check_suites():
+            if suite.app.id == CI_APP:
+                conclusion = suite.conclusion
+                break
+
+        logger.info(f"Check suite status: overall: '{conclusion}'")
+        await self.submit_pr_summary(
+            series=series,
+            state=conclusion,
+            context_name=ctx,
+            target_url=pr.html_url,
+        )
+
+        logger.info("Fetching per-patch results")
+
+        job_url, res = self.sync_checks_pr_per_patch_workflow_run_results(pr)
+        if len(res) == 0:
+            logger.info(f"No checks found for {pr.number}: {pr.head.ref}")
+            return
+
+        patch_num = 1
+        for i in series.patches:
+            patch_id = i["id"]
+            patch_name = i["name"]
+
+            logger.info(f"Assume patch {patch_num} is patch {patch_id} \"{patch_name}\"")
+            if patch_num not in res:
+                continue
+
+            for j in res[patch_num]:
+                state = "success" if res[patch_num][j]["status"] == "OK" else "failure"
+                test = res[patch_num][j]["test"]
+                await series.set_check_id(patch_id,
+                                    state=state,
+                                    target_url=job_url,
+                                    context=f"patch-{patch_num}-test-{j}",
+                                    description=f"{test}")
+
+            patch_num += 1
 
     def get_github_actions_url(self, pr: PullRequest, status: Status) -> str:
         """Find a URL representing a GitHub Actions run for the given pull
