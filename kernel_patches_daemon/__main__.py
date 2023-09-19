@@ -21,13 +21,33 @@ from kernel_patches_daemon.daemon import KernelPatchesDaemon
 from opentelemetry import metrics
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import (
-    ConsoleMetricExporter,
+    MetricExportResult,
+    MetricExporter,
+    MetricsData,
     PeriodicExportingMetricReader,
 )
 from opentelemetry.sdk.resources import Resource
 
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+
+class NullExporter(MetricExporter):
+    def __init__(self): super().__init__()
+
+    def export(
+        self,
+        metrics_data: MetricsData,
+        timeout_millis: float = 10_000,
+        **kwargs,
+    ) -> MetricExportResult:
+        return MetricExportResult.SUCCESS
+
+    def shutdown(self, timeout_millis: float = 30_000, **kwargs) -> None:
+        pass
+
+    def force_flush(self, timeout_millis: float = 10_000) -> bool:
+        return True
 
 
 class ScriptMetricsExporter:
@@ -113,7 +133,7 @@ if __name__ == "__main__":
 
     meter_provider = MeterProvider(
         resource=Resource(attributes={"service_name": "kernel_patches_daemon"}),
-        metric_readers=[PeriodicExportingMetricReader(ConsoleMetricExporter())],
+        metric_readers=[PeriodicExportingMetricReader(NullExporter())],
     )
     metrics.set_meter_provider(meter_provider)
 
