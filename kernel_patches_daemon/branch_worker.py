@@ -964,10 +964,16 @@ class BranchWorker(GithubConnector):
             return "", {}
 
         logs_url = job.logs_url()
-        logs = requests.get(logs_url, allow_redirects=True)
-        logs = logs.content.decode('utf-8')
-        strs = logs.splitlines()
-        return job.html_url, scrape_workflow_run_results(strs)
+        try:
+            logs = requests.get(logs_url, allow_redirects=True)
+            logs = logs.content.decode('utf-8')
+            strs = logs.splitlines()
+        except requests.exceptions.ConnectionError as e:
+            logger.warning(
+                f"Expected exception while getting logs PR {pr.id} url: {logs_url} exception: {e}")
+            return "", {}
+        else:
+            return job.html_url, scrape_workflow_run_results(strs)
 
     async def sync_checks_rv(self, pr: PullRequest, series: Series) -> None:
         # if it's merge conflict - report failure
