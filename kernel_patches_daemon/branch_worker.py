@@ -744,7 +744,7 @@ class BranchWorker(GithubConnector):
         patch_content = await series.get_patch_binary_content()
         with temporary_patch_file(patch_content) as tmp_patch_file:
             try:
-                self.repo_local.git.am("--3way", istream=tmp_patch_file)
+                self.repo_local.git.am("-s", "--3way", istream=tmp_patch_file)
             except git.exc.GitCommandError as e:
                 logger.warning(
                     f"Failed complete 3-way merge series {series.id} patch into {branch_name} branch: {e}"
