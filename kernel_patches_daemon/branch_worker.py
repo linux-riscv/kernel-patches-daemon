@@ -320,7 +320,7 @@ def _is_outdated_pr(pr: PullRequest) -> bool:
 
 
 def scrape_workflow_run_results(logs: List[str]) -> Dict:
-    reg = ".*##.*](OK|FAIL).*Patch (\d?\d?\d+)/.*Test (\d?\d?\d+)/\d?\d?\d+: (.*)"
+    reg = ".*##.*](OK|FAIL|WARN).*Patch (\d?\d?\d+)/.*Test (\d?\d?\d+)/\d?\d?\d+: (.*)"
     p = re.compile(reg)
     res = {}
     for i in logs:
@@ -333,9 +333,16 @@ def scrape_workflow_run_results(logs: List[str]) -> Dict:
             if patchnum not in res:
                 res[patchnum] = {}
             if testnum not in res[patchnum]:
-                res[patchnum][testnum] = {}
-                res[patchnum][testnum]["status"] = status
-                res[patchnum][testnum]["test"] = test
+                logger.warning(f"Multiple tests with same id: patch {patchnum}: test: {testnum}: {test}")
+            res[patchnum][testnum] = {}
+            if status == "OK":
+                state = "success"
+            elif status == "WARN":
+                state = "warning"
+            else:
+                state = "failure"
+            res[patchnum][testnum]["status"] = state
+            res[patchnum][testnum]["test"] = test
     return res
 
 
@@ -1024,7 +1031,7 @@ class BranchWorker(GithubConnector):
                 continue
 
             for j in res[patch_num]:
-                state = "success" if res[patch_num][j]["status"] == "OK" else "failure"
+                state = res[patch_num][j]["status"]
                 test = res[patch_num][j]["test"]
                 await series.set_check_id(patch_id,
                                     state=state,
