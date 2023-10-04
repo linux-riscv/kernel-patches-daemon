@@ -323,6 +323,9 @@ def scrape_workflow_run_results(logs: List[str]) -> Dict:
     reg = ".*##.*](OK|FAIL|WARN).*Patch (\d?\d?\d+)/.*Test (\d?\d?\d+)/\d?\d?\d+: (.*)"
     p = re.compile(reg)
     res = {}
+    err = 0
+    warn = 0
+    ok = 0
     for i in logs:
         m = p.match(i)
         if m:
@@ -332,17 +335,28 @@ def scrape_workflow_run_results(logs: List[str]) -> Dict:
             test = m.group(4)
             if patchnum not in res:
                 res[patchnum] = {}
-            if testnum not in res[patchnum]:
+            if testnum in res[patchnum]:
                 logger.warning(f"Multiple tests with same id: patch {patchnum}: test: {testnum}: {test}")
             res[patchnum][testnum] = {}
             if status == "OK":
                 state = "success"
+                ok += 1
             elif status == "WARN":
                 state = "warning"
+                warn += 1
             else:
                 state = "failure"
+                err += 1
             res[patchnum][testnum]["status"] = state
             res[patchnum][testnum]["test"] = test
+
+    if err:
+        res["conclusion"] = "failure"
+    elif warn:
+        res["conclusion"] = "warning"
+    elif ok:
+        res["conclusion"] = "success"
+
     return res
 
 
@@ -1006,13 +1020,8 @@ class BranchWorker(GithubConnector):
                 conclusion = suite.conclusion
                 break
 
-        logger.info(f"Check suite status: overall: '{conclusion}'")
-        await self.submit_pr_summary(
-            series=series,
-            state=conclusion,
-            context_name=ctx,
-            target_url=pr.html_url,
-        )
+        if conclusion != "success" and conclusion != "failure":
+            return
 
         logger.info("Fetching per-patch results")
 
@@ -1020,6 +1029,14 @@ class BranchWorker(GithubConnector):
         if len(res) == 0:
             logger.info(f"No checks found for {pr.number}: {pr.head.ref}")
             return
+
+        logger.info(f"Check suite status: overall: '{conclusion}'")
+        await self.submit_pr_summary(
+            series=series,
+            state=res["conclusion"],
+            context_name=ctx,
+            target_url=pr.html_url,
+        )
 
         patch_num = 1
         for i in series.patches:
