@@ -748,7 +748,8 @@ class BranchWorker(GithubConnector):
         if Path(f"{self.ci_repo_dir}/.github").exists():
             execute_command(f"cp --archive {self.ci_repo_dir}/.github {self.repo_dir}")
             self.repo_local.git.add("--force", ".github")
-        execute_command(f"cp --archive {self.ci_repo_dir}/* {self.repo_dir}")
+        # XXX Only copy .github for now...
+        # execute_command(f"cp --archive {self.ci_repo_dir}/* {self.repo_dir}")
         self.repo_local.git.add("--all", "--force")
         self.repo_local.git.commit("--all", "--message", "adding ci files")
 
