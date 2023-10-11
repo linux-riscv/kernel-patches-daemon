@@ -632,7 +632,7 @@ class Patchwork:
             **check_data,
             "state": new_state,
         }
-        logger.info(
+        logger.debug(
             f"Trying to update check for {patch_id} with a new content: {json_pprint(updated_check_data)}"
         )
         try:

@@ -228,7 +228,7 @@ def _is_pr_flagged(pr: PullRequest) -> bool:
 
 
 def execute_command(cmd: str) -> None:
-    logger.info(cmd)
+    logger.debug(cmd)
     os.system(cmd)
 
 
@@ -748,7 +748,8 @@ class BranchWorker(GithubConnector):
         if Path(f"{self.ci_repo_dir}/.github").exists():
             execute_command(f"cp --archive {self.ci_repo_dir}/.github {self.repo_dir}")
             self.repo_local.git.add("--force", ".github")
-        execute_command(f"cp --archive {self.ci_repo_dir}/* {self.repo_dir}")
+        # XXX Only copy .github for now...
+        # execute_command(f"cp --archive {self.ci_repo_dir}/* {self.repo_dir}")
         self.repo_local.git.add("--all", "--force")
         self.repo_local.git.commit("--all", "--message", "adding ci files")
 
@@ -1043,7 +1044,7 @@ class BranchWorker(GithubConnector):
             patch_id = i["id"]
             patch_name = i["name"]
 
-            logger.info(f"Assume patch {patch_num} is patch {patch_id} \"{patch_name}\"")
+            logger.debug(f"Assume patch {patch_num} is patch {patch_id} \"{patch_name}\"")
             if patch_num not in res:
                 continue
 
