@@ -228,7 +228,7 @@ def _is_pr_flagged(pr: PullRequest) -> bool:
 
 
 def execute_command(cmd: str) -> None:
-    logger.info(cmd)
+    logger.debug(cmd)
     os.system(cmd)
 
 
@@ -1043,7 +1043,7 @@ class BranchWorker(GithubConnector):
             patch_id = i["id"]
             patch_name = i["name"]
 
-            logger.info(f"Assume patch {patch_num} is patch {patch_id} \"{patch_name}\"")
+            logger.debug(f"Assume patch {patch_num} is patch {patch_id} \"{patch_name}\"")
             if patch_num not in res:
                 continue
 
