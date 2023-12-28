@@ -457,6 +457,9 @@ class Series:
         ]
         await asyncio.gather(*tasks)
 
+    async def set_check_id(self, patch_id, **kwargs) -> None:
+        await self.pw_client.post_check_for_patch_id_raw(patch_id, check_data=kwargs)
+
     def to_json(self) -> str:
         json_keys = {
             "id",
@@ -674,6 +677,36 @@ class Patchwork:
             data=updated_check_data,
         )
 
+    async def post_check_for_patch_id_raw(
+        self, patch_id: int, check_data: Dict[str, Any]
+    ) -> Optional[aiohttp.ClientResponse]:
+        new_state = check_data["state"]
+        updated_check_data = {
+            **check_data,
+            "state": check_data["state"],
+        }
+        logger.debug(
+            f"Trying to update check for {patch_id} with a new content: {json_pprint(updated_check_data)}"
+        )
+        try:
+            check = await self.get_latest_check_for_patch(patch_id, check_data["context"])
+            if (check.get("state") == new_state and check.get("target_url") == check_data["target_url"]):
+                logger.debug(
+                    f"Not posting state update for patch {patch_id}: previous state '{new_state}' and url are the same"
+                )
+                return None
+
+            logger.info(
+                f"Updating patch {patch_id} check, current state: '{check.get('state')}', new state: '{new_state}'"
+            )
+        except ValueError:
+            logger.info(f"Setting patch {patch_id} check to '{new_state}' state")
+
+        return await self.__try_post(
+            f"patches/{patch_id}/checks/",
+            data=updated_check_data,
+        )
+    
     async def get_series_by_id(self, series_id: int) -> Series:
         # fetches directly only if series is not available in local scope
         if series_id not in self.known_series:

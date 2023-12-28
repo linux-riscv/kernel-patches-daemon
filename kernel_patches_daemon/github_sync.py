@@ -229,7 +229,7 @@ class GithubSync(Stats):
                 logging.info(
                     f"Created/updated {pr} ({pr.head.ref}): {pr.url} for series {series.id}"
                 )
-                await worker.sync_checks(pr, series)
+                await worker.sync_checks_rv(pr, series)
                 # Close out other PRs if exists
                 self.close_existing_prs_with_same_base(list(self.workers.values()), pr)
 
@@ -259,7 +259,7 @@ class GithubSync(Stats):
                     latest_series = await subject.latest_series or series
                     self.increment_counter("all_known_subjects")
                     await worker.checkout_and_patch(branch_name, latest_series)
-                    await worker.sync_checks(pr, latest_series)
+                    await worker.sync_checks_rv(pr, latest_series)
 
             await loop.run_in_executor(None, worker.expire_branches)
             await loop.run_in_executor(None, worker.expire_user_prs)
