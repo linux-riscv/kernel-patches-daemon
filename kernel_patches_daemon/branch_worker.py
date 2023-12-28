@@ -19,6 +19,8 @@ import shutil
 import tempfile
 import time
 from collections import namedtuple
+import re
+import requests
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from email.mime.application import MIMEApplication
@@ -349,7 +351,7 @@ def _is_pr_flagged(pr: PullRequest) -> bool:
 
 
 def execute_command(cmd: str) -> None:
-    logger.info(cmd)
+    logger.debug(cmd)
     os.system(cmd)
 
 
@@ -464,6 +466,45 @@ def _is_outdated_pr(pr: PullRequest) -> bool:
     age = datetime.now(timezone.utc) - last_modified
     logger.info(f"Pull request {pr} has age {age}")
     return age > PULL_REQUEST_TTL
+
+
+def scrape_workflow_run_results(logs: List[str]) -> Dict:
+    reg = ".*##.*](OK|FAIL|WARN).*Patch (\d?\d?\d+)/.*Test (\d?\d?\d+)/\d?\d?\d+: (.*)"
+    p = re.compile(reg)
+    res = {}
+    err = 0
+    warn = 0
+    ok = 0
+    for i in logs:
+        m = p.match(i)
+        if m:
+            status = m.group(1)
+            patchnum = int(m.group(2))
+            testnum = int(m.group(3))
+            test = m.group(4)
+            if patchnum not in res:
+                res[patchnum] = {}
+            if testnum in res[patchnum]:
+                logger.warning(f"Multiple tests with same id: patch {patchnum}: test: {testnum}: {test}")
+            res[patchnum][testnum] = {}
+            if status == "OK":
+                state = "success"
+                ok += 1
+            elif status == "WARN":
+                state = "warning"
+                warn += 1
+            else:
+                state = "fail"
+                err += 1
+            res[patchnum][testnum]["status"] = state
+            res[patchnum][testnum]["test"] = test
+
+    if err:
+        res["conclusion"] = Status.FAILURE
+    elif ok or warn:
+        res["conclusion"] = Status.SUCCESS
+
+    return res
 
 
 class BranchWorker(GithubConnector):
@@ -866,7 +907,8 @@ class BranchWorker(GithubConnector):
         if Path(f"{self.ci_repo_dir}/.github").exists():
             execute_command(f"cp --archive {self.ci_repo_dir}/.github {self.repo_dir}")
             self.repo_local.git.add("--force", ".github")
-        execute_command(f"cp --archive {self.ci_repo_dir}/* {self.repo_dir}")
+        # XXX Only copy .github for now...
+        # execute_command(f"cp --archive {self.ci_repo_dir}/* {self.repo_dir}")
         self.repo_local.git.add("--all", "--force")
         self.repo_local.git.commit("--all", "--message", "adding ci files")
 
@@ -883,7 +925,7 @@ class BranchWorker(GithubConnector):
         patch_content = await series.get_patch_binary_content()
         with temporary_patch_file(patch_content) as tmp_patch_file:
             try:
-                self.repo_local.git.am("--3way", istream=tmp_patch_file)
+                self.repo_local.git.am("-s", "--3way", istream=tmp_patch_file)
             except git.exc.GitCommandError as e:
                 logger.warning(
                     f"Failed complete 3-way merge series {series.id} patch into {branch_name} branch: {e}"
@@ -1135,14 +1177,147 @@ class BranchWorker(GithubConnector):
 
         await self.evaluate_ci_result(status, series, pr, jobs)
 
+    def sync_checks_pr_per_patch_workflow_run_results(self, pr: PullRequest) -> (str, Dict):
+        workflow_run = None
+        for i in self.repo.get_workflow_runs(head_sha=pr.head.sha):
+            if i.name == "linux-riscv-ci-patches":
+                workflow_run = i
+                break
+        if not workflow_run:
+            return "", {}
+        job = None
+        for i in workflow_run.jobs():
+            if i.name == "build-patches":
+                job = i
+                break
+        if not job:
+            return "", {}
+
+        logs_url = job.logs_url()
+        try:
+            logs = requests.get(logs_url, allow_redirects=True)
+            logs = logs.content.decode('utf-8')
+            strs = logs.splitlines()
+        except requests.exceptions.ConnectionError as e:
+            logger.warning(
+                f"Expected exception while getting logs PR {pr.id} url: {logs_url} exception: {e}")
+            return "", {}
+        else:
+            return job.html_url, scrape_workflow_run_results(strs)
+
+    async def sync_checks_rv(self, pr: PullRequest, series: Series) -> None:
+        # Make sure that we are working with up-to-date data (as opposed to
+        # cached state).
+        pr.update()
+        # if it's merge conflict - report failure
+        ctx = f"{CI_DESCRIPTION}-{self.repo_branch}"
+        if _is_pr_flagged(pr):
+            await series.set_check(
+                status=Status.CONFLICT,
+                target_url=pr.html_url,
+                context=f"{ctx}-PR",
+                description=MERGE_CONFLICT_LABEL,
+            )
+            await self.evaluate_ci_result(Status.CONFLICT, series, pr)
+            return
+
+        logger.info(f"Fetching workflow runs for {pr}: {pr.head.ref} (@ {pr.head.sha})")
+
+        statuses: List[Status] = []
+        jobs = []
+
+        # Note that we are interested in listing *all* runs and not just, say,
+        # completed ones. The reason being that the information that pending
+        # ones are present is very much relevant for status reporting.
+        for run in self.repo.get_workflow_runs(
+            actor=self.user_login,
+            head_sha=pr.head.sha,
+        ):
+            status = gh_conclusion_to_status(run.conclusion)
+            run_jobs = run.jobs()
+
+            # Overall run failure could have many reasons, including
+            # infrastructure issues or an in-progress rebase. Make an attempt at
+            # detecting those. To reduce the number of failures we report
+            # prematurely (runs will be retried eventually).
+            if status == Status.FAILURE:
+                for job in run_jobs:
+                    for step in job.steps:
+                        # If a step has no conclusion but the overall run is
+                        # failed, the workflow was likely interrupted
+                        # prematurely and never got a chance to finish (e.g.,
+                        # because the runner died). Do not report failure, as we
+                        # shall retry eventually.
+                        # Similarly, if KPD does a force push because the
+                        # upstream baseline changed we map that to pending. The
+                        # run will be retried.
+                        if step.conclusion is None or step.conclusion == "cancelled":
+                            logger.info(
+                                f"Step {step.name} of {run} was interrupted/canceled; marking workflow as pending"
+                            )
+                            status = Status.PENDING
+                            break
+
+            statuses.append(status)
+            jobs += run_jobs
+
+        status = process_statuses(statuses)
+        # In order to keep PW contexts somewhat deterministic, we sort the array
+        # of jobs by name and later use the index of the test in the array to
+        # generate the context name.
+        jobs = sorted(jobs, key=lambda job: job.name)
+        jobs_logs = [
+            f"{job.conclusion} -> {gh_conclusion_to_status(job.conclusion)} ({job.html_url})"
+            for job in jobs
+        ]
+
+        logger.info(f"Workflow status: overall: '{status}', jobs: '{jobs_logs}")
+
+        if status != Status.SUCCESS and status != Status.FAILURE:
+            return
+
+        job_url, res = self.sync_checks_pr_per_patch_workflow_run_results(pr)
+        if len(res) == 0:
+            logger.info(f"No checks found for {pr.number}: {pr.head.ref}")
+            return
+
+        await self.submit_pr_summary(
+            series=series,
+            status=res["conclusion"],
+            context_name=ctx,
+            target_url=pr.html_url,
+        )
+
+        patch_num = 1
+        for i in series.patches:
+            patch_id = i["id"]
+            patch_name = i["name"]
+
+            logger.debug(f"Assume patch {patch_num} is patch {patch_id} \"{patch_name}\"")
+            if patch_num not in res:
+                continue
+
+            for j in res[patch_num]:
+                state = res[patch_num][j]["status"]
+                test = res[patch_num][j]["test"]
+                await series.set_check_id(patch_id,
+                                          state=state,
+                                          target_url=job_url,
+                                          context=f"patch-{patch_num}-test-{j}",
+                                          description=f"{test}")
+
+            patch_num += 1
+        await self.evaluate_ci_result(res["conclusion"], series, pr)
+
     async def evaluate_ci_result(
         self, status: Status, series: Series, pr: PullRequest, jobs: List[WorkflowJob]
     ) -> None:
         """Evaluate the result of a CI run and send an email as necessary."""
-        email = self.email
-        if email is None:
-            logger.info("No email configuration present; skipping sending...")
-            return
+        # Removed for RV
+        # email = self.email
+        # if email is None:
+        #    logger.info("No email configuration present; skipping sending...")
+        #    return
 
         if status in (Status.PENDING, Status.SKIPPED):
             return
@@ -1172,6 +1347,7 @@ class BranchWorker(GithubConnector):
             # way, send an email notifying the submitter.
             logger.info(f"{pr} is now {new_label}; adding label")
             pr.add_to_labels(new_label)
+            return  # RV
 
             logger.info(f"Sending email notification for {pr}")
             failed_logs = await self.log_extractor.extract_failed_logs(jobs)
