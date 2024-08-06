@@ -960,9 +960,10 @@ class BranchWorker(GithubConnector):
             # In other words, patchwork could be reporting a relevant
             # status (ie. !accepted) while the series has already been
             # merged and pushed.
-            if await _series_already_applied(self.repo_local, series):
-                logger.info(f"Series {series.url} already applied to tree")
-                raise NewPRWithNoChangeException(self.repo_pr_base_branch, branch_name)
+            # RV -- bug, will enter if git-am fails halfway in.
+            # if await _series_already_applied(self.repo_local, series):
+            #     logger.info(f"Series {series.url} already applied to tree")
+            #     raise NewPRWithNoChangeException(self.repo_pr_base_branch, branch_name)
 
             comment = (
                 f"{comment}\nPull request is *NOT* updated. Failed to apply {series.web_url}\n"
