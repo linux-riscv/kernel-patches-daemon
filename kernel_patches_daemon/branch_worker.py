@@ -937,6 +937,18 @@ class BranchWorker(GithubConnector):
     async def apply_push_comment(
         self, branch_name: str, series: Series
     ) -> Optional[PullRequest]:
+        pr = await self._guess_pr(series, branch=branch_name)
+        if pr:
+            pr.update()
+            status_labels = {
+                suffix.to_label(series.version) for suffix in StatusLabelSuffixes
+            }
+            for label in pr.labels:
+                if label.name in status_labels:
+                    logger.info(f"Series {series.url} is NOT pushed, CI passed at least once")
+                    if pr.state == "closed":
+                        return None
+                    return pr
         comment = (
             f"Upstream branch: {self.upstream_sha}\nseries: {series.web_url}\n"
             f"version: {series.version}\n"
@@ -1218,7 +1230,7 @@ class BranchWorker(GithubConnector):
                 context=f"{ctx}-PR",
                 description=MERGE_CONFLICT_LABEL,
             )
-            await self.evaluate_ci_result(Status.CONFLICT, series, pr)
+            await self.evaluate_ci_result(Status.CONFLICT, series, pr, [])
             return
 
         logger.info(f"Fetching workflow runs for {pr}: {pr.head.ref} (@ {pr.head.sha})")
@@ -1307,7 +1319,7 @@ class BranchWorker(GithubConnector):
                                           description=f"{test}")
 
             patch_num += 1
-        await self.evaluate_ci_result(res["conclusion"], series, pr)
+        await self.evaluate_ci_result(res["conclusion"], series, pr, [])
 
     async def evaluate_ci_result(
         self, status: Status, series: Series, pr: PullRequest, jobs: List[WorkflowJob]
